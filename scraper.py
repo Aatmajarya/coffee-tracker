@@ -17,7 +17,10 @@ HEADERS = {
 
 def get_subscribers():
     r = requests.get(f"{SUPABASE_URL}/rest/v1/subscribers?select=chat_id", headers=HEADERS)
-    return [row["chat_id"] for row in r.json()]
+    data = r.json()
+    if not isinstance(data, list):
+        return []
+    return [row["chat_id"] for row in data]
 
 def send_message(chat_id, text):
     requests.post(
@@ -34,24 +37,37 @@ def broadcast(text):
 # ─── Supabase snapshot helpers ────────────────────────────────────────────────
 
 def get_snapshot(brand):
+    brand_encoded = requests.utils.quote(brand)
     r = requests.get(
-        f"{SUPABASE_URL}/rest/v1/product_snapshots?brand=eq.{brand}&select=product_name,price,available",
+        f"{SUPABASE_URL}/rest/v1/product_snapshots?brand=eq.{brand_encoded}&select=product_name,price,available",
         headers=HEADERS
     )
-    return {row["product_name"]: row for row in r.json()}
+    data = r.json()
+    if not isinstance(data, list):
+        print(f"  Snapshot fetch error for {brand}: {data}")
+        return None
+    if len(data) == 0:
+        return None  # First run for this brand
+    return {row["product_name"]: row for row in data}
 
 def upsert_snapshot(brand, products):
-    rows = [{"brand": brand, "product_name": p["name"], "price": p["price"], "available": p["available"], "last_seen": datetime.utcnow().isoformat()} for p in products]
-    requests.post(
-        f"{SUPABASE_URL}/rest/v1/product_snapshots",
-        headers={**HEADERS, "Prefer": "resolution=merge-duplicates"},
-        json=rows
-    )
+    for p in products:
+        row = {
+            "brand": brand,
+            "product_name": p["name"],
+            "price": p["price"],
+            "available": p["available"],
+            "last_seen": datetime.utcnow().isoformat()
+        }
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/product_snapshots",
+            headers={**HEADERS, "Prefer": "resolution=merge-duplicates"},
+            json=row
+        )
 
 # ─── Scraper (Shopify) ────────────────────────────────────────────────────────
 
 def scrape_shopify(brand_name, shop_url):
-    """Works for any Shopify store — fetches /products.json"""
     try:
         base = shop_url.rstrip("/")
         r = requests.get(f"{base}/products.json?limit=250", timeout=15)
@@ -80,20 +96,23 @@ def check_brand(brand_name, shop_url):
         print(f"  No products found for {brand_name}")
         return
 
+    # First run — save baseline, no alerts
+    if old is None:
+        print(f"  First run for {brand_name} — saving {len(new_products)} products as baseline. No alerts.")
+        upsert_snapshot(brand_name, new_products)
+        return
+
     new_map = {p["name"]: p for p in new_products}
     alerts = []
 
     for name, data in new_map.items():
         if name not in old:
-            # Brand new product
             status = "✅ In Stock" if data["available"] else "❌ Out of Stock"
             alerts.append(f"🆕 <b>New Product!</b>\n{brand_name}: {name}\nPrice: ₹{data['price']}\n{status}")
         else:
             prev = old[name]
-            # Restocked
             if not prev["available"] and data["available"]:
                 alerts.append(f"🔔 <b>Restocked!</b>\n{brand_name}: {name}\nPrice: ₹{data['price']}")
-            # Price drop
             try:
                 if float(data["price"]) < float(prev["price"]):
                     alerts.append(f"💰 <b>Price Drop!</b>\n{brand_name}: {name}\n₹{prev['price']} → ₹{data['price']}")
