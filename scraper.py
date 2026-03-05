@@ -16,7 +16,7 @@ HEADERS = {
 # ─── Telegram ────────────────────────────────────────────────────────────────
 
 def get_subscribers():
-    r = requests.get(f"{SUPABASE_URL}/rest/v1/subscribers?select=chat_id", headers=HEADERS)
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/subscribers?select=chat_id", headers=HEADERS, timeout=10)
     data = r.json()
     if not isinstance(data, list):
         return []
@@ -25,7 +25,8 @@ def get_subscribers():
 def send_message(chat_id, text):
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+        json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+        timeout=10
     )
 
 def broadcast(text):
@@ -40,7 +41,8 @@ def get_snapshot(brand):
     brand_encoded = requests.utils.quote(brand)
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/product_snapshots?brand=eq.{brand_encoded}&select=product_name,price,available",
-        headers=HEADERS
+        headers=HEADERS,
+        timeout=10
     )
     data = r.json()
     if not isinstance(data, list):
@@ -51,19 +53,26 @@ def get_snapshot(brand):
     return {row["product_name"]: row for row in data}
 
 def upsert_snapshot(brand, products):
-    for p in products:
-        row = {
-            "brand": brand,
-            "product_name": p["name"],
-            "price": p["price"],
-            "available": p["available"],
-            "last_seen": datetime.utcnow().isoformat()
-        }
-        requests.post(
+    # Batch all products in one request
+    rows = [{
+        "brand": brand,
+        "product_name": p["name"],
+        "price": p["price"],
+        "available": p["available"],
+        "last_seen": datetime.utcnow().isoformat()
+    } for p in products]
+
+    # Supabase accepts up to 1000 rows per request
+    chunk_size = 100
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i:i+chunk_size]
+        r = requests.post(
             f"{SUPABASE_URL}/rest/v1/product_snapshots",
             headers={**HEADERS, "Prefer": "resolution=merge-duplicates"},
-            json=row
+            json=chunk,
+            timeout=30
         )
+        print(f"  Upserted chunk {i//chunk_size + 1}: status {r.status_code}")
 
 # ─── Scraper (Shopify) ────────────────────────────────────────────────────────
 
@@ -98,7 +107,7 @@ def check_brand(brand_name, shop_url):
 
     # First run — save baseline, no alerts
     if old is None:
-        print(f"  First run for {brand_name} — saving {len(new_products)} products as baseline. No alerts.")
+        print(f"  First run for {brand_name} — saving {len(new_products)} products as baseline.")
         upsert_snapshot(brand_name, new_products)
         return
 
