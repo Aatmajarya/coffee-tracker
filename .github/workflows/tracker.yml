@@ -1,9 +1,7 @@
 name: Coffee Tracker
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'  # Every 30 minutes
-  workflow_dispatch:          # Allow manual trigger
+  workflow_dispatch:  # Manual trigger only (cron disabled until setup complete)
 
 jobs:
   track:
